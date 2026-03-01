@@ -145,7 +145,8 @@ private:
     //
     mutable std::mutex  inference_mutex_;           // serialises TRT context + CUDA buffers
 
-    // Input shape (must match the TRT engine's fixed profile)
+    // Input shape — auto-detected from the TRT engine's binding after BuildEngine().
+    // These fallback defaults are only used if the engine query fails.
     int             input_width_{640};
     int             input_height_{640};
     int             num_classes_{80};

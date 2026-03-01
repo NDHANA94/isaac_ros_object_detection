@@ -53,6 +53,8 @@ def generate_launch_description():
     arducam_pkg = get_package_share_directory('isaac_ros_arducam_b0573')
     arducam_params_file = os.path.join(arducam_pkg, 'config', 'params.yaml')
 
+    publish_annotated_image = _get(_load_yaml(obj_det_params_file), 'object_detection_node', 'ros__parameters', 'publish_annotated_image', default=False)
+
     return LaunchDescription([
 
         # ── Composable container: camera + encoder + detector ─────────────────
@@ -100,14 +102,14 @@ def generate_launch_description():
                     parameters=[obj_det_params_file],
                 ),
 
-                # ── 4. Annotated Image Publisher node ─────────────────────────────
-                # This node subscribes to the raw image topic and the detection results
-                ComposableNode(
+                # ── 4. Annotated Image Publisher node (optional) ──────────────
+                # Loaded only when publish_annotated_image=True in obj_det_params.yaml.
+                *([ComposableNode(
                     package='isaac_ros_object_detection',
                     plugin='nvidia::isaac_ros::object_detection::AnnotatedImagePublisherNode',
                     name='annotated_image_publisher_node',
                     parameters=[annotated_img_pub_params],
-                ),
+                )] if publish_annotated_image else []),
             ],
             output='screen',
         ),

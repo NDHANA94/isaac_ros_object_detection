@@ -157,8 +157,10 @@ AnnotatedImagePublisherNode::AnnotatedImagePublisherNode(
     pub_depth_         = declare_parameter<int>(
         "pub_topic_image.pub_depth", 10);
 
-    model_input_width_  = declare_parameter<int>("detection_model_input_width",  640);
-    model_input_height_ = declare_parameter<int>("detection_model_input_height", 640);
+    // detection_model_input_width / detection_model_input_height are no longer required:
+    // bounding boxes from ObjectDetectionNode are published normalised to [0, 1]
+    // relative to the model input size, so scaling by the actual image dimensions
+    // (already known from the incoming image message) is sufficient.
     num_classes_        = declare_parameter<int>("num_classes", 80);
 
     draw_labels_         = declare_parameter<bool>("draw_labels",    true);
@@ -650,8 +652,9 @@ void AnnotatedImagePublisherNode::AnnotateAndPublish(
         dets = last_det_;
     }
 
-    const float scale_x = static_cast<float>(img_w) / model_input_width_;
-    const float scale_y = static_cast<float>(img_h) / model_input_height_;
+    // Bounding boxes are normalised [0, 1]; scale directly by the actual image dimensions.
+    const float scale_x = static_cast<float>(img_w);
+    const float scale_y = static_cast<float>(img_h);
 
     // ── Build BBoxDraw list ────────────────────────────────────────────────
     std::vector<BBoxDraw>       boxes;

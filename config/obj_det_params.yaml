@@ -13,8 +13,8 @@ object_detection_node:
       model_path: "/home/orin/ros2_ws/src/ros2_px4_object_follower/isaac_ros_object_detection/engines/yolo26n_fp16.plan"
       class_names_path: "/home/orin/ros2_ws/src/ros2_px4_object_follower/isaac_ros_object_detection/config/coco.names"
       quantization: "fp16"  # "fp16" or "int8" (must match how the engine was built)
-      input_width: 640
-      input_height: 640
+      # input_width / input_height are auto-detected from the TRT engine's binding shape at startup.
+      # No need to set them manually.
       num_classes: 80
       input_tensor_name: "input_tensor"
       trt_input_binding_name: "images"
@@ -41,6 +41,9 @@ object_detection_node:
           reliability: "best_effort"
           durability: "volatile"
           depth: 10
+
+    # ----- Annotated Image Output (for visualization) -----
+    publish_annotated_image: true
   
 
     

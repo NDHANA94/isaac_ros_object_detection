@@ -138,8 +138,6 @@ private:
     std::string pub_durability_         {"volatile"};
     int         pub_depth_              {10};
 
-    int   model_input_width_            {640};
-    int   model_input_height_           {640};
     int   num_classes_                  {80};
 
     bool    draw_labels_                {true};

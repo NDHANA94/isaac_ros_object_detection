@@ -122,8 +122,7 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions & options)
   input_tensor_name_          = this->declare_parameter<std::string>("engine.input_tensor_name",       "input_tensor");
   trt_input_binding_name_     = this->declare_parameter<std::string>("engine.trt_input_binding_name",  "images");
   output_tensor_name_         = this->declare_parameter<std::string>("engine.output_tensor_name",      "output0");
-  input_width_                = this->declare_parameter("engine.input_width",   640);
-  input_height_               = this->declare_parameter("engine.input_height",  640);
+  // input_width_ / input_height_ are auto-detected from the TRT engine after BuildEngine()
   num_classes_                = this->declare_parameter("engine.num_classes",   80);
 
   // Filters group
@@ -159,8 +158,12 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions & options)
   // synchronization is handled via CUDA events
   CUDA_CHECK(cudaStreamCreateWithFlags(&cuda_stream_, cudaStreamNonBlocking));
 
-  // const size_t elem = use_fp16_ ? 2u : 4u; // bytes per element (float16 vs float32)
-  // Device-side I/O buffers (presistent - allocated once, reused every frame)
+  // --- TensorRT engine -------------------------------------------------------------------------------
+  // BuildEngine() auto-detects input_width_ / input_height_ from the engine's binding shape,
+  // so it must run before any buffer allocation that depends on those dimensions.
+  BuildEngine();
+
+  // Device-side I/O buffers (persistent - allocated once, reused every frame).
   // TRT engine I/O tensors are always float32 regardless of FP16/INT8 precision setting
   // (FP16/INT8 only affects internal layer computation, not the I/O buffer format).
   const size_t in_bytes  = 1 * 3 * input_width_ * input_height_ * sizeof(float);  // [1, 3, H, W]
@@ -171,11 +174,12 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions & options)
   CUDA_CHECK(cudaMalloc(&d_input_, in_bytes));
   CUDA_CHECK(cudaMalloc(&d_output_, out_bytes));
 
-  // --- VIC workspcae ---------------------------------------------------------------------------------
-  if (hardware_decoder_ != "cuda")  AllocVICSurface();
+  // Bind device buffers to the TRT execution context now that they are allocated
+  trt_context_->setTensorAddress(trt_input_binding_name_.c_str(), d_input_);
+  trt_context_->setTensorAddress(output_tensor_name_.c_str(), d_output_);
 
-  // --- TensorRT engine -------------------------------------------------------------------------------
-  BuildEngine();
+  // --- VIC workspace ---------------------------------------------------------------------------------
+  if (hardware_decoder_ != "cuda")  AllocVICSurface();
 
   
   // --- NITROS subscriber ----------------------------------------------------------------------------
@@ -246,9 +250,25 @@ ObjectDetectionNode::BuildEngine()
   trt_context_.reset(trt_engine_->createExecutionContext());
   if(!trt_context_) throw std::runtime_error("Failed to create TRT execution context.");
 
-  // Bind device buffers to named I/O tensors (use TRT engine binding names, not NITROS tensor names)
-  trt_context_->setTensorAddress(trt_input_binding_name_.c_str(), d_input_);
-  trt_context_->setTensorAddress(output_tensor_name_.c_str(), d_output_);
+  // ── Auto-detect input dimensions from the engine binding shape ──────────────
+  // Engine input tensor is [1, 3, H, W]; indices 2 and 3 give H and W.
+  auto dims = trt_engine_->getTensorShape(trt_input_binding_name_.c_str());
+  if (dims.nbDims == 4 && dims.d[2] > 0 && dims.d[3] > 0) {
+    input_height_ = static_cast<int>(dims.d[2]);
+    input_width_  = static_cast<int>(dims.d[3]);
+    RCLCPP_INFO(get_logger(),
+      "Auto-detected model input dimensions from TRT engine: %dx%d",
+      input_width_, input_height_);
+  } else {
+    RCLCPP_WARN(get_logger(),
+      "Could not auto-detect input dimensions from TRT engine "
+      "(binding '%s', nbDims=%d). Keeping defaults %dx%d.",
+      trt_input_binding_name_.c_str(), dims.nbDims, input_width_, input_height_);
+  }
+
+  // Bind device buffers to named I/O tensors.
+  // NOTE: d_input_ / d_output_ are allocated in the constructor after BuildEngine() returns;
+  //       setTensorAddress() is called there once the buffers exist.
 
   RCLCPP_INFO(get_logger(), "Successfully loaded TRT engine from %s", model_path_.c_str());
 }
@@ -507,10 +527,15 @@ ObjectDetectionNode::PublishDetections(
   for (const auto& obj : objects) {
     vision_msgs::msg::Detection2D det;
     det.header = header;
-    det.bbox.center.position.x = obj.x;
-    det.bbox.center.position.y = obj.y;
-    det.bbox.size_x = obj.w;
-    det.bbox.size_y = obj.h;
+    // Normalise bbox coordinates to [0, 1] relative to the model input size so
+    // downstream nodes (annotated image publisher, target locker, etc.) do not
+    // need to know the engine's fixed input resolution.
+    const float inv_w = 1.0f / static_cast<float>(input_width_);
+    const float inv_h = 1.0f / static_cast<float>(input_height_);
+    det.bbox.center.position.x = obj.x * inv_w;
+    det.bbox.center.position.y = obj.y * inv_h;
+    det.bbox.size_x = obj.w * inv_w;
+    det.bbox.size_y = obj.h * inv_h;
 
     vision_msgs::msg::ObjectHypothesisWithPose hyp;
     // Use class name if available, otherwise fall back to numeric string

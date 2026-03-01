@@ -28,9 +28,7 @@ annotated_image_publisher_node:
       pub_depth: 10
 
     # ── Detection Model Parameters ──────────────────────────────────────────────────
-    detection_model_input_width: 640        # important for bbox scaling if the model was trained on a specific input size
-    detection_model_input_height: 640       # important for bbox scaling if the model was trained on a specific input size
-    num_classes: 80                         # important for color assignment if box_color is set to [-1, -1, -1]
+    num_classes: 80               # used for per-class colour assignment when box_color is [-1,-1,-1]
 
     # ── Visualization Parameters ─────────────────────────────────────────────────────
     draw_labels: true
