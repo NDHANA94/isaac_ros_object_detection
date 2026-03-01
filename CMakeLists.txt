@@ -86,9 +86,7 @@ endif()
 
 add_library(${PROJECT_NAME} SHARED
   src/object_detection_node.cpp
-  src/annotated_image_publisher_node.cpp
   src/cuda_kernels.cu
-  src/annotation_kernels.cu
 )
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
@@ -118,11 +116,6 @@ rclcpp_components_register_node(${PROJECT_NAME}
   EXECUTABLE object_detection_node_component
 )
 
-rclcpp_components_register_node(${PROJECT_NAME}
-  PLUGIN     "nvidia::isaac_ros::object_detection::AnnotatedImagePublisherNode"
-  EXECUTABLE annotated_image_publisher_node_component
-)
-
 # ─────────────────────────────────────────────────────────────────────────────
 # TARGET 2 — Object Detection standalone executable (dev / ros2 run)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -150,23 +143,6 @@ target_link_libraries(object_detection_node
 
 ament_target_dependencies(object_detection_node ${ROS_DEPS})
 
-add_executable(annotated_image_publisher_node
-  src/annotated_image_publisher_main.cpp
-)
-
-target_include_directories(annotated_image_publisher_node PRIVATE
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  ${CUDAToolkit_INCLUDE_DIRS}
-  ${NVBUF_INCLUDE_DIR}
-)
-
-target_link_libraries(annotated_image_publisher_node
-  ${PROJECT_NAME}
-  ${HW_LIBS}
-)
-
-ament_target_dependencies(annotated_image_publisher_node ${ROS_DEPS})
-
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -177,8 +153,6 @@ install(TARGETS
     ${PROJECT_NAME}
     object_detection_node
     object_detection_node_component
-    annotated_image_publisher_node
-    annotated_image_publisher_node_component
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
