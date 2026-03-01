@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>isaac_ros_object_detection</name>
+  <version>0.0.0</version>
+  <description>Hardware accelerated Isaac ROS Object Detection</description>
+  <maintainer email="nipun.dhananjaya@gmail.com">WM NIPUN DHANANJAYA</maintainer>
+  <license>MIT License</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclcpp_components</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>vision_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>message_filters</depend>
+
+  <!-- Isaac ROS NITROS zero-copy transport -->
+  <depend>isaac_ros_managed_nitros</depend>
+  <depend>isaac_ros_nitros_tensor_list_type</depend>
+  <depend>isaac_ros_nitros_image_type</depend>
+
+  <!-- OpenCV for CPU fallback and glyph atlas generation -->
+  <depend>libopencv-dev</depend>
+
+  <!-- Upstream pipeline nodes (used in launch files only) -->
+  <exec_depend>isaac_ros_argus_camera</exec_depend>
+  <exec_depend>isaac_ros_dnn_image_encoder</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,0 +1,43 @@
+annotated_image_publisher_node:
+  ros__parameters:
+    # ── Topics ────────────────────────────────────────────────────────────────
+    sub_topic_detections:
+      topic_name: "/object_detection/detections"    # vision_msgs/Detection2DArray
+      sub_reliability: "best_effort"
+      sub_durability: "volatile"
+      sub_depth: 10
+
+    sub_topic_image:
+      topic_name: "/arducam/left/nitros_image_rgb8"    # sensor_msgs/Image
+      transport: "nitros"                              # options: "raw" | "compressed" | "nitros" (raw NitrosImage)
+      sub_reliability: "reliable"                    
+      sub_durability: "volatile"
+      sub_depth: 10
+
+    sub_topic_camera_info:                       # important for getting the intrinsic parameters for correct bbox scaling and visualization
+      topic_name: "/arducam/left/image/camera_info"    # sensor_msgs/CameraInfo
+      sub_reliability: "best_effort"
+      sub_durability: "volatile"
+      sub_depth: 10
+
+    pub_topic_image: 
+      topic_name_prefix: "/object_detection/annotated_image"    # sensor_msgs/Image
+      transport: "compressed"                     # "raw" or "compressed" (if supported by the subscriber)
+      pub_reliability: "best_effort"
+      pub_durability: "volatile"
+      pub_depth: 10
+
+    # ── Detection Model Parameters ──────────────────────────────────────────────────
+    detection_model_input_width: 640        # important for bbox scaling if the model was trained on a specific input size
+    detection_model_input_height: 640       # important for bbox scaling if the model was trained on a specific input size
+    num_classes: 80                         # important for color assignment if box_color is set to [-1, -1, -1]
+
+    # ── Visualization Parameters ─────────────────────────────────────────────────────
+    draw_labels: true
+    draw_confidence: true
+    confidence_threshold: 0.5
+    font_size: 0.5
+    font_thickness: 1
+    box_thickness: 3
+    box_color: [-1, -1, -1]  # Green in BGR format (set [-1, -1, -1] for class-specific colors)
+  

@@ -1,0 +1,16 @@
+dnn_image_encoder_node:
+  ros__parameters:
+    input_image_width: 640        # should be automated with extracting width and height from the input image topic header
+    input_image_height: 480
+    network_image_width: 640
+    network_image_height: 640
+    image_mean: [0.5, 0.5, 0.5]
+    image_stddev: [0.5, 0.5, 0.5]
+    num_blocks: 40
+    enable_padding: true
+    keep_aspect_ratio: true
+    crop_mode: "CENTER"  # "TOP", "BOTTOM", "LEFT", "RIGHT", or "CENTER"
+    encoding_desired: "rgb8"
+    final_tensor_name: "input_tensor"
+    image_input_topic: "arducam/left/nitros_image_rgb8"  # Topic to subscribe for input images (isaac_ros_nitros_image_transport/msg/NitrosImage)
+    tensor_output_topic: "/dnn_enc/encoded_tensor"  # Topic to publish the encoded tensor (isaac_ros_nitros_tensor_list_nchw_rgb_f32_t)
