@@ -151,6 +151,15 @@ private:
     int             input_height_{640};
     int             num_classes_{80};
 
+    // Output shape — auto-detected from the TRT engine's output binding after BuildEngine().
+    // out_rows_ = dim[1], out_cols_ = dim[2]
+    //   NMS-embedded  (e.g. yolo26n): (1, 300,  6) → out_rows_=300, out_cols_=6
+    //   YOLOv8 native (e.g. yolov8n): (1,  84, 8400) → out_rows_=84, out_cols_=8400
+    int             out_rows_{300};
+    int             out_cols_{6};
+    // True when out_cols_ >> out_rows_ (transposed YOLOv8 format requires CPU NMS)
+    bool            is_yolov8_format_{false};
+
     // Detection thresholds
     float           confidence_threshold_{0.50f};
     float           nms_threshold_{0.45f};
@@ -182,7 +191,7 @@ private:
 
     // --- Device-side I/O buffers - never touch host memory in the hot path! ---
     void* d_input_{nullptr}; // [1, 3, H, W] float16/float32    ---  Device buffer for input image
-    void* d_output_{nullptr}; // [1, 8400, 85] float16/float32  ---  Device buffer for output detections
+    void* d_output_{nullptr}; // output buffer — sized to out_rows_ * out_cols_ * sizeof(float)
 
     // --- VIC / NvBufSurface workspace -------------------------------------------------------
     NvBufSurface*   vic_dst_surf_{nullptr}; // VIC output surface (resized/formatted frames for TensorRT input)
@@ -214,8 +223,9 @@ private:
     // Inference: TRT enqueueV3 - fully async, returns immediately after queuing work on GPU
     void RunInference();
 
-    // Post-processing: decode model output, filter by confidence, outputs final detections in device memory
-    std::vector<Object> DecodeOutputGPU(const void* d_output, int num_predictions);
+    // Post-processing: decode model output, filter by confidence, apply NMS if needed.
+    // Branches automatically based on is_yolov8_format_.
+    std::vector<Object> DecodeOutputGPU(const void* d_output);
 
    
 

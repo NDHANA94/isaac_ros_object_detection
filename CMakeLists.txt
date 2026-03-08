@@ -26,7 +26,11 @@ find_package(CUDAToolkit REQUIRED)
 
 # nvJPEG (hardware JPEG decode/encode)
 find_library(NVJPEG_LIB nvjpeg
-  PATHS /usr/lib/aarch64-linux-gnu /usr/local/cuda/lib64)
+  PATHS
+    /usr/lib/aarch64-linux-gnu/nvidia   # Jetson JetPack real .so location
+    /usr/local/cuda/lib64               # standard CUDA symlink tree
+    /usr/local/cuda-12.6/targets/aarch64-linux/lib   # versioned install path
+    /usr/lib/aarch64-linux-gnu)
 if(NOT NVJPEG_LIB)
   message(WARNING "nvjpeg library not found; GPU annotation path will be disabled")
 endif()

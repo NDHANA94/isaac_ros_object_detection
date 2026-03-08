@@ -167,8 +167,10 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions & options)
   // TRT engine I/O tensors are always float32 regardless of FP16/INT8 precision setting
   // (FP16/INT8 only affects internal layer computation, not the I/O buffer format).
   const size_t in_bytes  = 1 * 3 * input_width_ * input_height_ * sizeof(float);  // [1, 3, H, W]
-  // yolo26n has NMS embedded: output is (1, 300, 6)  float32  [x1,y1,x2,y2,conf,cls_id]
-  const size_t out_bytes = 1 * 300 * 6 * sizeof(float);
+  // Output buffer sized from the auto-detected engine shape (set by BuildEngine()).
+  //   NMS-embedded (yolo26n): out_rows_=300, out_cols_=6   → 1 800 floats
+  //   YOLOv8 native (yolov8n): out_rows_=84,  out_cols_=8400 → 705 600 floats
+  const size_t out_bytes = static_cast<size_t>(out_rows_) * static_cast<size_t>(out_cols_) * sizeof(float);
 
   // Allocate device buffers
   CUDA_CHECK(cudaMalloc(&d_input_, in_bytes));
@@ -266,6 +268,30 @@ ObjectDetectionNode::BuildEngine()
       trt_input_binding_name_.c_str(), dims.nbDims, input_width_, input_height_);
   }
 
+  // ── Auto-detect output tensor shape to select decode path ─────────────────────────────
+  // • NMS-embedded (yolo26n):  (1, 300,  6) → out_rows_=300, out_cols_=6
+  //   Each row: [x1, y1, x2, y2, conf, cls_id]  (no CPU NMS needed)
+  // • YOLOv8 native (yolov8n): (1,  84, 8400) → out_rows_=84, out_cols_=8400
+  //   Row k col j: raw[k*8400+j]; rows 0-3 = cx/cy/w/h, rows 4-83 = class scores
+  //   (requires CPU NMS)
+  auto out_dims = trt_engine_->getTensorShape(output_tensor_name_.c_str());
+  if (out_dims.nbDims == 3 && out_dims.d[1] > 0 && out_dims.d[2] > 0) {
+    out_rows_ = static_cast<int>(out_dims.d[1]);
+    out_cols_ = static_cast<int>(out_dims.d[2]);
+    // Heuristic: YOLOv8 has many more anchors (cols) than attribute rows.
+    // yolo26n is the opposite (300 rows, 6 cols).
+    is_yolov8_format_ = (out_cols_ > out_rows_);
+    RCLCPP_INFO(get_logger(),
+      "Auto-detected output shape: (1, %d, %d) — %s format",
+      out_rows_, out_cols_,
+      is_yolov8_format_ ? "YOLOv8 transposed (CPU NMS)" : "NMS-embedded xyxy+conf+cls");
+  } else {
+    RCLCPP_WARN(get_logger(),
+      "Could not auto-detect output shape from TRT engine "
+      "(binding '%s', nbDims=%d). Keeping defaults %dx%d.",
+      output_tensor_name_.c_str(), out_dims.nbDims, out_rows_, out_cols_);
+  }
+
   // Bind device buffers to named I/O tensors.
   // NOTE: d_input_ / d_output_ are allocated in the constructor after BuildEngine() returns;
   //       setTensorAddress() is called there once the buffers exist.
@@ -352,7 +378,7 @@ ObjectDetectionNode::InputCallback(
   RunInference();
 
   // ── Decode detections on GPU ────────────────────────────────────
-  auto objects = DecodeOutputGPU(d_output_, 300);
+  auto objects = DecodeOutputGPU(d_output_);
 
   // Debug: ros log detected object list
   RCLCPP_DEBUG(get_logger(), "Detected %zu objects", objects.size());
@@ -435,72 +461,161 @@ ObjectDetectionNode::RunInference()
 
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Post-processing: GPU decode + CPU NMS
+// Post-processing helpers (file-scope, not exported)
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+// IoU of two center-format (cx, cy, w, h) boxes.
+float iou_center(const Object& a, const Object& b)
+{
+  const float ax1 = a.x - a.w * 0.5f, ay1 = a.y - a.h * 0.5f;
+  const float ax2 = a.x + a.w * 0.5f, ay2 = a.y + a.h * 0.5f;
+  const float bx1 = b.x - b.w * 0.5f, by1 = b.y - b.h * 0.5f;
+  const float bx2 = b.x + b.w * 0.5f, by2 = b.y + b.h * 0.5f;
+  const float ix1 = std::max(ax1, bx1), iy1 = std::max(ay1, by1);
+  const float ix2 = std::min(ax2, bx2), iy2 = std::min(ay2, by2);
+  const float inter = std::max(0.f, ix2 - ix1) * std::max(0.f, iy2 - iy1);
+  if (inter <= 0.f) return 0.f;
+  return inter / (a.w * a.h + b.w * b.h - inter);
+}
+
+// Greedy per-class NMS. `dets` is sorted descending by prob on return.
+std::vector<Object> greedy_nms(std::vector<Object> dets, float iou_thresh)
+{
+  std::sort(dets.begin(), dets.end(),
+            [](const Object& a, const Object& b) { return a.prob > b.prob; });
+  std::vector<bool> keep(dets.size(), true);
+  for (size_t i = 0; i < dets.size(); ++i) {
+    if (!keep[i]) continue;
+    for (size_t j = i + 1; j < dets.size(); ++j) {
+      if (keep[j] && dets[i].label == dets[j].label &&
+          iou_center(dets[i], dets[j]) > iou_thresh) {
+        keep[j] = false;
+      }
+    }
+  }
+  std::vector<Object> out;
+  out.reserve(dets.size());
+  for (size_t i = 0; i < dets.size(); ++i) {
+    if (keep[i]) out.push_back(dets[i]);
+  }
+  return out;
+}
+
+} // anonymous namespace
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Post-processing: decode TRT output → Object list
+//
+// Supports two output layouts determined at runtime from the engine shape:
+//
+//  NMS-embedded  (e.g. yolo26n): (1, N, 6)
+//    Each row i: [x1, y1, x2, y2, conf, cls_id]  (xyxy absolute pixels, post-NMS)
+//    is_yolov8_format_ == false
+//
+//  YOLOv8 native (e.g. yolov8n): (1, 4+C, A)
+//    Memory layout: row-major, row k has A values for all anchors.
+//    row 0..3 = cx/cy/w/h; rows 4..4+C-1 = per-class scores.
+//    conf = max class score (no separate objectness in YOLOv8).
+//    is_yolov8_format_ == true  →  CPU NMS applied after decode.
 // ─────────────────────────────────────────────────────────────────────────────
 
 std::vector<Object>
-ObjectDetectionNode::DecodeOutputGPU(
-  const void* d_output,
-  int /*num_predictions*/  // 300 for yolo26n (post-NMS embedded in model)
-)
+ObjectDetectionNode::DecodeOutputGPU(const void* d_output)
 {
-  // yolo26n engine has NMS baked in. Output: (1, 300, 6) float32
-  // Each row: [x1, y1, x2, y2, confidence, class_id]  (xyxy absolute pixels at 640x640)
-  // Rows with confidence == 0 are padding — filter them out.
-  constexpr int MAX_DETS = 300;
-  constexpr int FIELDS   = 6;
+  // Copy the whole output tensor to host in one DtoH transfer.
+  const size_t total_floats = static_cast<size_t>(out_rows_) * static_cast<size_t>(out_cols_);
+  std::vector<float> h_raw(total_floats, 0.0f);
 
-  std::vector<float> h_raw(MAX_DETS * FIELDS, 0.0f);
-
-  // Sync inference before reading results
   CUDA_CHECK(cudaStreamSynchronize(cuda_stream_));
   CUDA_CHECK(cudaMemcpy(h_raw.data(), d_output,
-                        MAX_DETS * FIELDS * sizeof(float),
+                        total_floats * sizeof(float),
                         cudaMemcpyDeviceToHost));
 
-  std::vector<Object> out;
-  out.reserve(MAX_DETS);
+  // ── Branch A: NMS-embedded format (1, MAX_DETS, 6) ───────────────────────
+  if (!is_yolov8_format_) {
+    const int MAX_DETS = out_rows_;   // e.g. 300
+    // out_cols_ must be exactly 6 for this format
+    std::vector<Object> out;
+    out.reserve(MAX_DETS);
 
-  for (int i = 0; i < MAX_DETS; ++i) {
-    const float* b = h_raw.data() + i * FIELDS;
+    for (int i = 0; i < MAX_DETS; ++i) {
+      const float* b = h_raw.data() + i * out_cols_;
+      const float conf = b[4];
+      if (conf < confidence_threshold_) continue;
 
-    const float conf = b[4];
+      const float x1 = std::max(0.f, std::min(b[0], static_cast<float>(input_width_)));
+      const float y1 = std::max(0.f, std::min(b[1], static_cast<float>(input_height_)));
+      const float x2 = std::max(0.f, std::min(b[2], static_cast<float>(input_width_)));
+      const float y2 = std::max(0.f, std::min(b[3], static_cast<float>(input_height_)));
+      const float w  = x2 - x1;
+      const float h  = y2 - y1;
+      // Zero/negative boxes poison the Kalman filter — skip them.
+      if (w <= 0.f || h <= 0.f) continue;
 
-    // Skip zero-confidence padding rows and low-confidence detections
-    if (conf < confidence_threshold_) continue;
+      Object obj;
+      obj.x     = (x1 + x2) * 0.5f;
+      obj.y     = (y1 + y2) * 0.5f;
+      obj.w     = w;
+      obj.h     = h;
+      obj.prob  = conf;
+      obj.label = static_cast<int>(b[5]);
 
-    // yolo26n output is xyxy (absolute pixels at input resolution).
-    // byte_track::Object requires center-format {cx, cy, w, h}.
-    // Clamp coordinates to image bounds and skip degenerate boxes (can occur
-    // when the camera moves fast and objects are partially off-screen).
-    const float x1 = std::max(0.f, std::min(b[0], static_cast<float>(input_width_)));
-    const float y1 = std::max(0.f, std::min(b[1], static_cast<float>(input_height_)));
-    const float x2 = std::max(0.f, std::min(b[2], static_cast<float>(input_width_)));
-    const float y2 = std::max(0.f, std::min(b[3], static_cast<float>(input_height_)));
+      if (!allowed_classes_.empty() &&
+          allowed_classes_.find(obj.label) == allowed_classes_.end())
+        continue;
 
-    const float w = x2 - x1;
-    const float h = y2 - y1;
-    // Skip zero/negative-size boxes — they produce NaN in TlwhToXyah (div-by-h)
-    // which then poisons the LAPJV cost matrix and causes a segfault.
-    if (w <= 0.f || h <= 0.f) continue;
-
-    Object obj;
-    obj.x     = (x1 + x2) * 0.5f;        // center x
-    obj.y     = (y1 + y2) * 0.5f;        // center y
-    obj.w     = w;
-    obj.h     = h;
-    obj.prob  = conf;
-    obj.label = static_cast<int>(b[5]);
-
-    // Apply class filter (empty allowed_classes_ means keep all)
-    if (!allowed_classes_.empty() && allowed_classes_.find(obj.label) == allowed_classes_.end())
-      continue;
-
-    out.push_back(obj);
+      out.push_back(obj);
+    }
+    return out;   // NMS already done inside model
   }
 
-  // NMS already done inside the model.
-  return out;
+  // ── Branch B: YOLOv8 native format (1, 4+C, A) ───────────────────────────
+  // out_rows_ = 4 + num_classes (e.g. 84),  out_cols_ = num_anchors (e.g. 8400)
+  const int A       = out_cols_;           // number of anchors
+  const int num_cls = out_rows_ - 4;       // number of classes
+
+  std::vector<Object> candidates;
+  candidates.reserve(512);
+
+  for (int j = 0; j < A; ++j) {
+    // bbox — rows 0-3, column j
+    const float cx = h_raw[0 * A + j];
+    const float cy = h_raw[1 * A + j];
+    const float bw = h_raw[2 * A + j];
+    const float bh = h_raw[3 * A + j];
+    if (bw <= 0.f || bh <= 0.f) continue;
+
+    // Find the best class score — rows 4..4+num_cls-1, column j
+    float best_score = -1.f;
+    int   best_cls   = -1;
+    for (int k = 0; k < num_cls; ++k) {
+      const float s = h_raw[(4 + k) * A + j];
+      if (s > best_score) { best_score = s; best_cls = k; }
+    }
+    if (best_score < confidence_threshold_) continue;
+
+    if (!allowed_classes_.empty() &&
+        allowed_classes_.find(best_cls) == allowed_classes_.end())
+      continue;
+
+    // Clamp center to image bounds
+    const float cx_c = std::max(0.f, std::min(cx, static_cast<float>(input_width_)));
+    const float cy_c = std::max(0.f, std::min(cy, static_cast<float>(input_height_)));
+
+    Object obj;
+    obj.x     = cx_c;
+    obj.y     = cy_c;
+    obj.w     = bw;
+    obj.h     = bh;
+    obj.prob  = best_score;
+    obj.label = best_cls;
+    candidates.push_back(obj);
+  }
+
+  return greedy_nms(std::move(candidates), nms_threshold_);
 }
 
 
