@@ -222,6 +222,7 @@ def main():
         dynamic=False,
         simplify=True,
         opset=17,
+        # nms=False,          # ← export raw output, let detector node handle NMS
     )
 
     # ultralytics ≥ 8.x returns the output path as a string
